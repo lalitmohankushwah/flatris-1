@@ -2,60 +2,78 @@
 # Build and push an image to Azure Container Registry
 # https://docs.microsoft.com/azure/devops/pipelines/languages/docker
 
-trigger: none
-
-resources:
-- repo: self
-
+trigger:
+- master
+ 
 variables:
-  # Container registry service connection established during pipeline creation
-  dockerRegistryServiceConnection: '617a72fd-ae38-4f4b-8cd9-9af2f47abf86'
-  imageRepository: 'flatris'
-  containerRegistry: 'vishal.azurecr.io'
-  dockerfilePath: '$(Build.SourcesDirectory)/Application/Dockerfile'
-  manifestPath: '$(Pipeline.workspace)/manifests/deployment.yaml'
-  tag: '$(Build.BuildId)'
+ 
+  # Azure Resource Manager connection created during pipeline creation
+  azureSubscription: 'Azure Resource Manager Linux'
   
+  # Web app name
+  webAppName: 'FlatrisMSFT'
+  
+  # Resource group
+  resourceGroupName: 'LALITRG'
+ 
+  # Environment name
+  environmentName: 'Azure-Devops-ENV-1'
+ 
   # Agent VM image name
   vmImageName: 'ubuntu-latest'
-
+  
 stages:
-- stage: Build
-  displayName: Build and push stage
+- stage: Archive
+  displayName: Archive stage
   jobs:  
-  - job: Build
-    displayName: Build
+  - job: Archive
+    displayName: Archive
     pool:
       vmImage: $(vmImageName)
-    steps:
-    - task: Docker@2
-      displayName: Build and push an image to container registry
+    steps:   
+    - task: AzureAppServiceSettings@1
       inputs:
-        containerRegistry: 'flatris-serviceconn'
-        repository: '$(imageRepository)'
-        command: 'buildAndPush'
-        Dockerfile: '**/Dockerfile'
-        tags: '$(tag)'
-    - task: Bash@3
+        azureSubscription: $(azureSubscription)
+        appName: $(webAppName)
+        resourceGroupName: $(resourceGroupName)
+        appSettings: |
+          [
+            {
+              "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+              "value": "true"
+            }
+          ]
+    - task: ArchiveFiles@2
+      displayName: 'Archive files'
       inputs:
-        targetType: 'inline'
-        script: |
-          # install anchore-cli
-          
-          sudo apt-get update
-          sudo apt-get install python-pip -y
-          pip install wheel
-          pip install --user --upgrade anchorecli
-          
-          NEWPATH="$HOME/.local/bin/:$PATH"
-          echo "##vso[task.setvariable variable=PATH;]$NEWPATH"
-    - task: AnchoreTask@1
-      inputs:
-        engineUrl: 'http://52.173.29.137:8228/v1'
-        engineUser: 'admin'
-        enginePassword: 'foobar'
-        imageName: '$(containerRegistry)/$(imageRepository):$(tag)'
-        doVulnScan: true
-
-    - publish: $(Build.SourcesDirectory)/Application/deployment.yaml
-      artifact: manifests
+        rootFolderOrFile: '$(System.DefaultWorkingDirectory)'
+        includeRootFolder: false
+        archiveType: zip
+        archiveFile: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+        replaceExistingArchive: true
+ 
+    - upload: $(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip
+      artifact: drop
+ 
+- stage: Deploy
+  displayName: Deploy stage
+  dependsOn: Archive
+  condition: succeeded()
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy
+    environment: $(environmentName)
+    pool: 
+      vmImage: $(vmImageName)
+    strategy:
+      runOnce:
+        deploy:
+          steps:            
+          - task: AzureWebApp@1
+            displayName: 'Azure Web App Deploy: Matt-Test-NodeJS-Deploy'
+            inputs:
+              azureSubscription: $(azureSubscription)
+              appType: webAppLinux
+              appName: $(webAppName)
+              runtimeStack: 'NODE|10.14'
+              package: $(Pipeline.Workspace)/drop/$(Build.BuildId).zip
